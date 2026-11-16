@@ -121,8 +121,8 @@ def generate(out_dir, seed: int = 42, counts: dict = None) -> dict:
         "counts": counts,
         "faults": faults,
     }
-    (gt_dir / "labels.json").write_text(
-        json.dumps(labels, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+    with open(gt_dir / "labels.json", "w", encoding="utf-8", newline="\n") as fh:  # Path.write_text(newline=) needs 3.10
+        fh.write(json.dumps(labels, ensure_ascii=False, indent=2) + "\n")
     return {"n_documents": len(docs), "roles": dict(Counter(d.role for d in docs)), "counts": counts}
 
 
