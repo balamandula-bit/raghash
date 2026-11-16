@@ -1,0 +1,7 @@
+data/
+__pycache__/
+.pytest_cache/
+*.pyc
+.venv/
+raghash_demo/
+*.egg-info/
