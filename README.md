@@ -30,6 +30,12 @@ look at the health of the corpus the answers come from.
 | Diagnosis | `diagnose` | every wrong answer gets a cause (9 kinds) and an owner: documents, search or model |
 | Report | `report` | one self-contained HTML page: what to fix first, ranked by questions repaired |
 
+```
+documents ──> Reader ──> Copies ──> Versions ──> Contradictions ──> Test set ──┐
+                                                                               ├──> Diagnosis ──> Report
+your RAG's answers + what it retrieved ────────────────────────────────────────┘
+```
+
 ![Diagnosis](docs/report-diagnosis.png)
 
 ## Try it in 60 seconds
@@ -43,6 +49,8 @@ python -m pip install pytest && python -m pytest -q      # 104 tests
 
 The demo makes a practice corpus with a hidden answer key, scans it, scores the scan against the key, builds the test
 set, runs a plain BM25 RAG baseline, diagnoses it and writes the report. About 20 seconds, Python 3.9+, no dependencies.
+
+To scan your own folder of `.md` / `.txt` files: `python -m raghash.report path/to/docs --out report.html`.
 
 To diagnose your own system, give it the generated test set and write its output as
 `{"Q-id": {"answer": "...", "retrieved": ["path/to/doc.md", ...]}}`, then run `python -m raghash.report <corpus> --answers answers.json --out report.html`.
@@ -81,7 +89,9 @@ key counts as a false alarm, a version pair in the wrong order is counted separa
 
 # Reference
 
-## Reference: the practice corpus
+Per-module details and the exact commands.
+
+## The practice corpus
 
 120 clean base documents (24 policy topics x 5 regions, across HR / IT / Finance / Engineering), plus fault documents.
 Each base document is used by at most one fault, so labels are never ambiguous.
@@ -137,13 +147,13 @@ Scoring is strict: a pair outside the truth set is a false positive, and `fp_bre
 (for example a scope trap or a version pair). Version pairs are ordered, and a correct pair in the wrong order is
 reported separately as `wrong_order`.
 
-## Reference: known limitations of the practice corpus
+## Limitations of the practice corpus
 
 - Documents are short (median 215 words) and use templated wording. Real corpora are longer and messier.
 - File modification times are always truthful. Real ones lie when a file is re-saved.
 - Only `.md` and `.txt`. PDF and DOCX parsing comes later.
 
-## Part 1: the Reader
+## Reader
 
 `raghash/reader.py` opens every `.md` / `.txt` file and returns one uniform record per document:
 normalised text, title, header fields (policy code, owner, applies to, version), sections, hashes, and
@@ -157,9 +167,9 @@ python -m raghash.reader_check --corpus data/synth_v1/corpus --truth data/synth_
 
 `reader_check` scores the Reader against the answer key. One finding to carry forward: for a copied file whose
 only date clue is its modified time, that time is the day the copy was made, not the document's date.
-Later parts must not trust mtime on copies.
+Later steps must not trust mtime on copies.
 
-## Part 2: the Duplicate finder
+## Duplicate finder
 
 `raghash/duplicates.py` finds duplicate pairs in three steps: **exact** (same bytes), **same_text** (same after
 the Reader cleans spaces), and **near** (word 3-gram similarity of at least 0.7 *and* the same numbers and decision
@@ -167,7 +177,7 @@ words such as "required" or "not allowed"). `minhash.py` (MinHash + LSH, pure Py
 comparing: about 600 of the 23,000 possible on the practice corpus.
 
 Similar pairs whose numbers or decision words differ are not duplicates. A limit changed, or "allowed" became
-"not allowed". They go to `revision_candidates` for Part 3. Similarity alone cannot separate the two kinds:
+"not allowed". They go to `revision_candidates` for the Version finder. Similarity alone cannot separate the two kinds:
 near-copies score 0.78 and up, revisions 0.77 to 0.97.
 
 ```bash
@@ -176,12 +186,12 @@ python -m raghash.evaluate --truth data/synth_v1/ground_truth --pred data/synth_
 ```
 
 Result on 12 different practice corpora: all 35 planted duplicates found each time, no false duplicates, and every
-version pair handed on to Part 3. The 0.7 threshold sits between the closest non-duplicate pair (0.64) and the
+version pair handed on to the Version finder. The 0.7 threshold sits between the closest non-duplicate pair (0.64) and the
 lowest near-copy (0.78). The practice text is templated, so expect a narrower gap on real documents.
 
-## Part 3: the Version finder
+## Version finder
 
-`raghash/versions.py` takes the `revision_candidates` from Part 2 and decides which file is newer. Steps: keep only
+`raghash/versions.py` takes the `revision_candidates` from the Duplicate finder and decides which file is newer. Steps: keep only
 pairs that are the same document (same title or policy code); collapse duplicate copies into one group so a re-saved
 copy cannot pose as a newer version; date each group (text, then file name, then the group's earliest modified time);
 order oldest to newest, using the version label only to break ties. Each link gets a confidence: **high** (two real
@@ -196,11 +206,11 @@ python -m raghash.evaluate --truth data/synth_v1/ground_truth --pred data/synth_
 Result on 11 different practice corpora: all 20 version pairs ordered correctly each time, no wrong order, nothing
 undetermined. On seed 42, 6 links are high confidence and 14 medium (their dates come from modified times).
 
-## Part 4: the Contradiction finder
+## Contradiction finder
 
 `raghash/contradictions.py` reads every document into claims, a fact key `(topic, subject, scope, region)` with a
-value, from table rows, bullets, FAQ question/answer pairs and plain sentences. It drops files Part 3 marked
-superseded and extra copies from Part 2, then flags two current documents that give different values for the same key.
+value, from table rows, bullets, FAQ question/answer pairs and plain sentences. It drops files the Version finder marked
+superseded and extra copies from the Duplicate finder, then flags two current documents that give different values for the same key.
 Because scope and region are in the key, "tier-1 vs tier-2" or "India vs Germany" is never flagged. Values compare as
 numbers with units (`5 years` equals `60 months`) or as decisions (`allowed` vs `not allowed`). Values in units that
 cannot be converted go to `incomparable`; a file that disagrees with itself goes to `internal`.
@@ -217,7 +227,7 @@ fact in the answer key, document by document.
 Honest limit: the extractor knows the sentence shapes of the practice corpus, so 100% here proves the logic after
 extraction, not the extraction itself. Real documents need an LLM or trained extractor in step 1; the rest stays.
 
-## Part 5: the Test question maker
+## Test question maker
 
 `raghash/testset.py` turns the corpus into a test set that follows it. One question per fact the current
 documents state, each with the correct answer and the wrong answers worth watching for, each wrong answer tagged with why:
@@ -247,9 +257,9 @@ shows 5 questions changed out of 609, the 5 that were drifted, and nothing else.
 Limits: answers are graded by reading numbers and yes/no words, which is enough for short answers but not for long
 free text; a yes/no answer that narrates both values ("it was not allowed but is now allowed") is ambiguous.
 
-## Part 6: the Failure diagnoser
+## Failure diagnoser
 
-`raghash/diagnose.py` takes the Part 5 test set and a system's answers **with what it retrieved**, and gives every
+`raghash/diagnose.py` takes the test set and a system's answers **with what it retrieved**, and gives every
 wrong answer one cause and one owner:
 
 | Cause | Meaning | Blame |
@@ -280,7 +290,7 @@ with no wrong cause or blame. This checks the rules, not real RAG behaviour.
 Known ambiguity: on a yes/no question, a flipped answer looks the same as quoting another scope's value held in the same
 policy, so the diagnoser reports `scope_confusion` rather than `generation_error` there. Both blame the generator.
 
-## Part 7: the Report
+## Report
 
 `raghash/report.py` runs the whole pipeline and writes one self-contained HTML file (no internet, no scripts,
 works on a phone, follows light/dark mode) plus the same data as JSON beside it.
@@ -295,16 +305,13 @@ by who should fix it, with worked examples; corpus health (contradictions side b
 copies); the test set, and with `--previous` what changed since. Every piece of text from a document is HTML-escaped.
 On seed 42 it lists 75 actions: 20 conflicts, 20 old versions, 35 copies.
 
-## Roadmap
+## What's next
 
-| Part | What | Status |
-|---|---|---|
-| 0 | Practice data + answer key | done |
-| 1 | Reader | done |
-| 2 | Duplicate finder | done |
-| 3 | Version finder | done |
-| 4 | Contradiction finder | done |
-| 5 | Test question maker | done |
-| 6 | Failure diagnoser | done |
-| 7 | Report | done |
-| 8 | Ship | done |
+- An LLM-based claim extractor, so the contradiction finder works on free-form documents
+- PDF and DOCX parsing
+- A ready-made adapter for LangChain / LlamaIndex pipelines to produce `answers.json`
+- Real-world corpora to replace the synthetic one
+
+## Author
+
+Built by [M. Bala Narasimha Swamy](https://www.linkedin.com/in/bala-mandula) (Hyderabad). MIT licensed.
